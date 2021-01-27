@@ -1,0 +1,498 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Tree Schema data catalog. Contains all resources required to deploy and serve 
+  Tree Schema with the exception of persistant data.
+
+Globals:
+  Function:
+    Timeout: 900
+
+Parameters:
+  EnvStageName:
+    Default: prod
+    Description: The environment name (e.g. dev, prod, etc.). This enables you to deploy 
+      Tree Schema in multiple environments.
+    Type: String
+  VpcId:
+    Description: The ID of the VPC Tree Schema is being deployed into. This is used to deploy 
+      the load balancer target group.
+    Type: AWS::EC2::VPC::Id 
+  AppSecurityGroups:
+    Description: A comma seperated list of security group IDs to apply to the Tree Schema 
+      app + associated services 
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  LoadBalancerSecurityGroups:
+    Description: A comma seperated list of security group IDs to apply to the Tree Schema 
+      load balancer, this  should have ports 443 and 80 exposed
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  AppSubnets:
+    Description: The subnet IDs to deploy the Tree Schema app + associated services into. 
+      These should be private subnet(s).
+    Type: List<AWS::EC2::Subnet::Id>
+  LoadBalancerSubnets:
+    Description: The list of subnet IDs to deploy the Tree Schema load balancer into. These
+      should be public subnet(s).
+    Type: List<AWS::EC2::Subnet::Id>
+  LoadBalancerCertArn:
+    Type: String
+    Description: The ARN for the certificate provided (or imported) into AWS Certificate 
+      Manager (ACM).  Tree Schema should be deployed as a subdomain under this certificate.
+  SecretsArn:
+    Type: String
+    Description: The ARN for the AWS Secrets for Tree Schema
+  FromEmailAddress:
+    Type: String
+    Description: The email address used to send emails via SES, this email should already 
+      be validated in SES.
+    ConstraintDescription: This must be verified in SES in the region that Tree Schema is deployed
+  KmsKeyArn:
+    Type: String
+    Description: The arn for the KMS key used to encrypt and decrypt sensitive information 
+      within Tree Schema
+  TreeSchemaImage:
+    Default: 656100572794.dkr.ecr.us-east-1.amazonaws.com/tree-schema-data-catalog-app:0.0.1
+    Description: The image of the container that serves the Tree Schema app
+    Type: String
+  TreeSchemaNginxImage:
+    Default: 656100572794.dkr.ecr.us-east-1.amazonaws.com/tree-schema-data-catalog-nginx:0.0.1
+    Description: The image of the reverse proxy Nginx container that sits in front of Tree Schema
+    Type: String
+  TreeSchemaApiImage:
+    Default: 656100572794.dkr.ecr.us-east-1.amazonaws.com/tree-schema-data-catalog-api:0.0.1
+    Description: The image of the image used to service the Tree Schema API
+    Type: String
+
+Resources:
+  
+  #####################
+  # Common S3 Buckets #
+  #####################
+
+  # Bucket for all files uploaded to the Tree Schema App
+  TreeSchemmaFilesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join
+        - '-'
+        - - "tree-schema"
+          - "files"
+          - !Ref AWS::Region
+          - !Ref EnvStageName
+          - !Ref AWS::AccountId
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  #############
+  # ECS Roles #
+  #############
+
+  # Add a policy to the existing role that was created in the first CFT
+  EcsTreeSchemaExecutionRolePolicy:
+    Type: AWS::IAM::Policy
+    DependsOn:
+      - TreeSchemaECSTaskRole
+    Description: Setting IAM Policy for updating S3 notification configs
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-EcsTreeSchemaExecutionRolePolicy-${EnvStageName}"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow passing of the Tree Schema Task role to the ECS container
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !GetAtt TreeSchemaECSTaskRole.Arn
+
+          # Write logs to CloudWatch, only allow to Tree Schema log group
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogStreams
+            Resource:
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:/aws/ecs/tree-schema/*"
+
+          # Retrieve the secrets used to build the environment variables
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetRandomPassword
+              - secretsmanager:GetResourcePolicy
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+              - secretsmanager:ListSecrets
+              - secretsmanager:ListSecretVersionIds
+            Resource: 
+              - !Ref SecretsArn
+      Roles:
+        - !ImportValue
+            Fn::Join:
+              - "-"
+              - - TreeSchemaECSExecutionRole
+                - !Ref EnvStageName
+                - 'Name'
+
+  # A role for the task containers
+  TreeSchemaECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-TreeSchemaECSTaskRole-${EnvStageName}"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+
+  TreeSchemaECSTaskRolePolicy:
+    Type: AWS::IAM::Policy
+    DependsOn:
+      - TreeSchemaECSTaskRole
+      - TreeSchemmaFilesBucket
+    Description: Setting IAM Policy for updating S3 notification configs
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-TreeSchemaECSTaskRolePolicy-${EnvStageName}"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow Tree Schema to discover cloudwatch resources, no create, update, or delete access
+          - Effect: Allow
+            Action:
+              - cloudwatch:List*
+              - cloudwatch:Describe*
+              - cloudwatch:Get*
+            Resource: 
+              - '*'
+
+          # Allow access to the single KMS key required for encryption/decryption
+          - Effect: Allow
+            Action:
+              - kms:List*
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource:
+              - !Ref KmsKeyArn
+
+          # Write logs to CloudWatch, only allow to Tree Schema log group
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogStreams
+            Resource:
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:/aws/ecs/tree-schema/*"
+          
+          # Read and write files to the Tree Schema S3 bucket
+          - Effect: Allow
+            Action:
+              - s3:List*
+              - s3:HeadBucket
+              - s3:Get*
+              - s3:PutObject
+              - s3:ReplicateObject
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:AbortMultipartUpload
+            Resource:
+              - !GetAtt TreeSchemmaFilesBucket.Arn
+              - Fn::Join:
+                - ''
+                - - !GetAtt TreeSchemmaFilesBucket.Arn
+                  - '/*' 
+
+          # Allow sending of emails but only from one address
+          - Effect: Allow
+            Action:
+              - ses:SendEmail
+              - ses:SendRawEmail
+            Resource:
+              - '*'
+            Condition:
+              StringEquals:
+                ses:FromAddress: !Ref FromEmailAddress
+          
+          # Allow retrieving email quotas
+          - Effect: Allow
+            Action:
+              - ses:GetSendQuota
+            Resource:
+              - '*'
+
+      Roles:
+        - !Ref TreeSchemaECSTaskRole
+
+  ###############
+  # ECS Cluster #
+  ###############
+
+  TreeSchemaECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${AWS::StackName}-TreeSchemaECSCluster-${EnvStageName}"
+
+  #################
+  # ECS resources #
+  #################
+
+  TreeSchemaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ["/aws/ecs", "tree-schema", 'app', 'tree-schema-app']]
+      RetentionInDays: 30
+
+  TreeSchemaTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - TreeSchemaLogGroup
+      - TreeSchemaECSTaskRole
+    Properties:
+      Family: !Join ['', ['tree-schema-app', TreeSchemaTaskDefinition]]
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: '2GB'
+      ExecutionRoleArn: !ImportValue
+        Fn::Join:
+          - "-"
+          - - TreeSchemaECSExecutionRole
+            - !Ref EnvStageName
+            - 'Arn'
+      TaskRoleArn: !GetAtt TreeSchemaECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: 'tree-schema-app'
+          Image: !Ref TreeSchemaImage
+          PortMappings:
+            - ContainerPort: 5000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref TreeSchemaLogGroup
+              awslogs-stream-prefix: ecs
+          EntryPoint:
+            - "/cmds/entrypoint"
+          Command:
+            - "/cmds/start"
+          Secrets:
+            - Name: TREE_SCHEMA_SECRET
+              ValueFrom: !Ref SecretsArn
+          Environment:
+            - Name: REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_UPLOAD_FILES_BUCKET
+              Value: !Ref TreeSchemmaFilesBucket
+            - Name: DEFAULT_FROM_EMAIL_ADDRESS
+              Value: !Ref FromEmailAddress
+            - Name: KMS_KEY_ALIAS
+              Value: !Ref KmsKeyArn
+        - Name: tree-schema-nginx
+          Image: !Ref TreeSchemaNginxImage
+          PortMappings:
+            - ContainerPort: 80
+          DependsOn:
+            - ContainerName: 'tree-schema-app'
+              Condition: START
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref TreeSchemaLogGroup
+              awslogs-stream-prefix: ecs
+        - Name: tree-schema-api
+          Image: !Ref TreeSchemaApiImage
+          PortMappings:
+            - ContainerPort: 8080
+          Secrets:
+            - Name: TREE_SCHEMA_SECRET
+              ValueFrom: !Ref SecretsArn
+          Environment:
+            - Name: REGION
+              Value: !Ref AWS::Region
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref TreeSchemaLogGroup
+              awslogs-stream-prefix: ecs
+
+  TreeSchemaCeleryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ["/aws/ecs", "tree-schema", 'celery', 'tree-schema-celery']]
+      RetentionInDays: 30
+
+  TreeSchemaCeleryTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - TreeSchemaLogGroup
+      - TreeSchemaECSTaskRole
+    Properties:
+      Family: !Join ['', ['tree-schema-celery', TreeSchemaCeleryTaskDefinition]]
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 1GB
+      ExecutionRoleArn: !ImportValue
+        Fn::Join:
+          - "-"
+          - - TreeSchemaECSExecutionRole
+            - !Ref EnvStageName
+            - 'Arn'
+      TaskRoleArn: !GetAtt TreeSchemaECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: 'tree-schema-celery'
+          Image: !Ref TreeSchemaImage
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref TreeSchemaCeleryLogGroup
+              awslogs-stream-prefix: ecs
+          EntryPoint:
+            - "/cmds/entrypoint"
+          Command:
+            - "/cmds/celery"
+          Secrets:
+            - Name: TREE_SCHEMA_SECRET
+              ValueFrom: !Ref SecretsArn
+          Environment:
+            - Name: REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_UPLOAD_FILES_BUCKET
+              Value: !Ref TreeSchemmaFilesBucket
+            - Name: DEFAULT_FROM_EMAIL_ADDRESS
+              Value: !Ref FromEmailAddress
+            - Name: KMS_KEY_ALIAS
+              Value: !Ref KmsKeyArn
+
+  TreeSchemaService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - TreeSchemaHttpsListener
+      - TreeSchemaECSCluster
+      - TreeSchemaTaskDefinition
+    Properties:
+      ServiceName: 'tree-schema-app'
+      Cluster: !GetAtt TreeSchemaECSCluster.Arn
+      TaskDefinition: !Ref TreeSchemaTaskDefinition
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref AppSubnets
+          SecurityGroups: !Ref AppSecurityGroups
+      LoadBalancers:
+        - ContainerName: tree-schema-nginx 
+          ContainerPort: 80
+          TargetGroupArn: !Ref TreeSchemaTargetGroup
+
+  TreeSchemaCeleryService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - TreeSchemaECSCluster
+      - TreeSchemaCeleryTaskDefinition
+    Properties:
+      ServiceName: 'tree-schema-celery'
+      Cluster: !GetAtt TreeSchemaECSCluster.Arn
+      TaskDefinition: !Ref TreeSchemaCeleryTaskDefinition
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref AppSubnets
+          SecurityGroups: !Ref AppSecurityGroups
+
+  ###########################
+  # Load balancer resources #
+  ###########################
+
+  TreeSchemaLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+      - Key: 'idle_timeout.timeout_seconds'
+        Value: 60
+      - Key: 'routing.http2.enabled'
+        Value: 'true'
+      - Key: 'access_logs.s3.enabled'
+        Value: 'false'
+      Scheme: internet-facing
+      SecurityGroups: !Ref LoadBalancerSecurityGroups
+      Subnets: !Ref LoadBalancerSubnets
+      Type: application
+
+  TreeSchemaHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+      - CertificateArn: !Ref LoadBalancerCertArn
+      DefaultActions:
+      - TargetGroupArn: !Ref TreeSchemaTargetGroup
+        Type: forward
+      LoadBalancerArn: !Ref TreeSchemaLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+
+  TreeSchemaHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - RedirectConfig:
+            Host: "#{host}"
+            Path: "/#{path}"
+            Port: 443
+            Protocol: "HTTPS"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+          Type: redirect
+      LoadBalancerArn: !Ref TreeSchemaLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  TreeSchemaTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      HealthCheckPath: '/health_check/'
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 90
+      HealthCheckTimeoutSeconds: 60
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200-299'
+      Protocol: HTTP
+      TargetType: ip
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: 60
+      VpcId: !Ref VpcId
+
+Outputs:
+
+  TreeSchemaLoadBalancerDNS:
+    Description: The DNS of the load balancer for Tree Schema
+    Value: !GetAtt TreeSchemaLoadBalancer.DNSName
+    Export:
+      Name: !Sub "TreeSchemaLoadBalancerDNS-${EnvStageName}-DNS"

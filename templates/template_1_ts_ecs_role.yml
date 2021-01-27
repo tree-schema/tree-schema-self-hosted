@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Resource pre-requisites for the Tree Schema app deployment. This is deployed as a separate template
+  in order to create the ECS execution role that will be used to pull the Tree Schema images from ECR.
+
+Globals:
+  Function:
+    Timeout: 900
+
+Parameters:
+  EnvStageName:
+    Default: prod
+    Description: The environment name (e.g. dev, prod, etc.). This enables you to deploy Tree Schema in multiple environments.
+    Type: String
+
+Resources:
+
+  ###########
+  # KMS Key #
+  ###########
+  TreeSchemaECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-TreeSchemaECSExecutionRole-${EnvStageName}"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+Outputs:
+
+  TreeSchemaEcsExecutionRole:
+    Description: The arn of the TreeSchemaECSExecutionRole
+    Value: !GetAtt TreeSchemaECSExecutionRole.Arn
+    Export:
+      Name: !Sub "TreeSchemaECSExecutionRole-${EnvStageName}-Arn"
+
+  TreeSchemaEcsExecutionRoleName:
+    Description: The arn of the TreeSchemaECSExecutionRole
+    Value: !Ref TreeSchemaECSExecutionRole
+    Export:
+      Name: !Sub "TreeSchemaECSExecutionRole-${EnvStageName}-Name" 
