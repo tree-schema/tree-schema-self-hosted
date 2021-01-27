@@ -7,7 +7,7 @@ This repo allows you to deploy Tree Schema [Data Catalog](https://treeschema.com
 
 Complete the following steps to deploy Tree Schema:
 
-1. Deploy `templates/template_1_ts_ecs_role.yml`. This will create an ECS execution role that will pull Tree Schema from the AWS ECR repo. The ARN for this role is provided as an output of the template.
+1. Deploy `templates/template_1_ts_ecs_role.yml`. This will create an ECS execution role that will pull the containers from the Tree Schema ECR repo. The ARN for this role is provided as an output of the template.
 
 2. Provide the ARN for the role created above to Tree Schema. This will grant cross-account access to pull the Tree Schema images. If you don't know who to contact please reach out to [developer@treeschema.com](mailto:developer@treeschema.com).
 
@@ -34,12 +34,12 @@ You must have the following before Tree Schema can be launched in your AWS accou
 
 ![Required Networking](imgs/required-networking.png?raw=true "Required Networking")
 
-- **A Certificate in ACM**: this is used to provide HTTPS verification on the load balancer deployed with Tree Schema. The Certificate must be in ACM because the Load Balancer requires this certiicate to apply HTTPS. At least two domains are required to deploy Tree Schema, one for the web application and one for the API endpoint. We reccomend creating a certificate that covers at least the two specific sub-domains that you choose, such as `treeschema.your-domain.com` and `api-treeschema.your-domain.com`. If needed, you can further limit access using your security groups to prevent access from the public internet.
+- **A Certificate in ACM**: this is used to provide HTTPS verification on the load balancer deployed with Tree Schema. The Certificate must be in ACM because the Load Balancer requires this certificate to apply HTTPS. At least two domains are required to deploy Tree Schema, one for the web application and one for the API endpoint. We reccomend creating a certificate that covers at least the two specific sub-domains that you choose, such as `treeschema.your-domain.com` and `api-treeschema.your-domain.com`. If needed, you can further limit access using your security groups to prevent access from the public internet.
   - Note: the sub domain for the API server **must** start with `api-`.
-- **A Postgres RDS database**: the database is created separately from the CFT to provide more control over the password and sizing of the database. You will likely be able to start Tree Schema on the smallest database size (micro). Tree Schema supports Postgres 11+ and we reccomend using the newest version of Postgres. Save the user, password, host and initial database name to place into the secrets below.
+- **A Postgres RDS database**: the database is created separately from the CFT to provide more control over the password and sizing of the database. You will likely be able to start Tree Schema on the smallest database size (micro). Tree Schema supports Postgres 11+ and we reccomend using the newest version of Postgres. Tree Schema uses a configurable database within Postgres, therefore you may reuse an existing Postgres instance. Save the user, password, host and initial database name to place into the secrets below.
 - **A Redis instance**: the redis instance is created separately from the CFT to provide more control over sizing of the cache. Tree Schema does not need a large cache and it also uses namespaces, therefore reusing an existing Redis instance should not cause any conflicts with your keys.
-- **A Secret in AWS Secrets Manager**: the information in this secret is defined below. These are used to pass in secure information to Tree Schema to connect to the databases and optionally provide SSO access via GOogle or Microsoft.
-- **An email address verified in SES**: Tree Schema will use to send emails to users. The SES account must also be approved to send emails to non-verified users, this can be done through a [service quota increase](#https://docs.aws.amazon.com/ses/latest/DeveloperGuide/manage-sending-quotas-request-increase.html).
+- **A Secret in AWS Secrets Manager**: the information in this secret is defined below. These are used to pass in secure information to Tree Schema to connect to the databases and optionally provide SSO access via Google or Microsoft.
+- **An email address verified in SES**: Tree Schema will use to send emails to users. The SES account must also be approved to send emails to non-verified users, this can be done through a [service quota increase](https://docs.aws.amazon.com/ses/latest/DeveloperGuide/manage-sending-quotas-request-increase.html).
 - **A KMS key**: this should be created using symmetric encryption. This key is used by Tree Schema to securely store additional credentials that are required to access your other databases. The image below shows the configurations required, access to this key is granted as part of this CFT to the ECS task role that the Tree Schema application will have.
 
 ![KMS Key](imgs/kms-key-configurations.png?raw=true)
@@ -124,7 +124,7 @@ Two examples are provided for how to deploy Tree Schema, one via the CLI, which 
 sh scripts/deploy_1.sh
 ```
 
-You can optionally pass in a profile with an argument:
+You can optionally pass in a profile name from your `~/.aws/credentials` file with an argument:
 ```bash
 sh scripts/deploy_1.sh my_profile
 ```
@@ -133,7 +133,7 @@ Otherwise the **default** profile will be used. You can find the ARN for the rol
 
 ![Tree Schema ECS Role SAM](imgs/sam-deploy-ecs-arn.png?raw=true)
 
-3. Fill in the template parameters for `scripts/deploy_2.sh`.
+3. Provide this ARN to Tree Schema and fill in the template parameters for `scripts/deploy_2.sh`.
 
 4. Run the second deployment script, you can also optionally pass in your profile.
 
