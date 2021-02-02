@@ -228,9 +228,40 @@ Resources:
               - ses:GetSendQuota
             Resource:
               - '*'
+          
+          # Allow triggering async one-off jobs
+          - Effect: Allow
+            Action:
+              - ecs:RunTask
+              - ecs:StopTask
+              - ecs:StartTask
+              - ecs:UpdateContainerAgent
+              - ecs:ListTasks
+              - ecs:DescribeTasks
+              - ecs:DescribeContainerInstances
+            Resource:
+              - !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/TreeSchemaOneOffTasks"
+            Condition:
+              ArnEquals:
+                'ecs:cluster': !GetAtt TreeSchemaECSCluster.Arn
+
+          # Allow passing the role to a one-off job
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !ImportValue
+                  Fn::Join:
+                    - "-"
+                    - - TreeSchemaECSExecutionRole
+                      - !Ref EnvStageName
+                      - 'Arn'
+              - !GetAtt TreeSchemaECSTaskRole.Arn
+                       
 
       Roles:
         - !Ref TreeSchemaECSTaskRole
+
 
   ###############
   # ECS Cluster #
@@ -257,7 +288,7 @@ Resources:
       - TreeSchemaLogGroup
       - TreeSchemaECSTaskRole
     Properties:
-      Family: !Join ['', ['tree-schema-app', TreeSchemaTaskDefinition]]
+      Family: tree-schema-app-TreeSchemaTaskDefinition
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
@@ -297,14 +328,6 @@ Resources:
               Value: !Ref FromEmailAddress
             - Name: KMS_KEY_ALIAS
               Value: !Ref KmsKeyArn
-            - Name: TREE_SCHEMA_TASK_DEFINITION
-              Value: !Join ['', ['tree-schema-app', TreeSchemaTaskDefinition]]
-            - Name: TREE_SCHEMA_ECS_CLUSTER
-              Value: !Ref TreeSchemaECSCluster
-            - Name: TREE_SCHEMA_SUBNETS
-              Value: !Ref AppSubnets
-            - Name: TREE_SCHEMA_SECURITY_GROUPS
-              Value: !Ref AppSecurityGroups
         - Name: tree-schema-nginx
           Image: !Ref TreeSchemaNginxImage
           PortMappings:
@@ -328,6 +351,14 @@ Resources:
           Environment:
             - Name: REGION
               Value: !Ref AWS::Region
+            - Name: TREE_SCHEMA_TASK_DEFINITION
+              Value: TreeSchemaOneOffTasks
+            - Name: TREE_SCHEMA_ECS_CLUSTER
+              Value: !Ref TreeSchemaECSCluster
+            - Name: TREE_SCHEMA_SUBNETS
+              Value: !Join [',',  !Ref AppSubnets]
+            - Name: TREE_SCHEMA_SECURITY_GROUPS
+              Value: !Join [',',  !Ref AppSecurityGroups] 
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -430,6 +461,58 @@ Resources:
           AssignPublicIp: DISABLED
           Subnets: !Ref AppSubnets
           SecurityGroups: !Ref AppSecurityGroups
+
+  TreeSchemaOneOffLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ["/aws/ecs", "tree-schema", 'app', 'tree-schema-one-off-batches']]
+      RetentionInDays: 30
+
+  # Runs one-off batch tasks that are triggered async
+  TreeSchemaOneOffTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    # Makes sure the log group is created before it is used.
+    DependsOn:
+      - TreeSchemaOneOffLogGroup
+    Properties:
+      Family: TreeSchemaOneOffTasks
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 0.25 vCPU
+      Memory: 1GB
+      ExecutionRoleArn: !ImportValue
+        Fn::Join:
+          - "-"
+          - - TreeSchemaECSExecutionRole
+            - !Ref EnvStageName
+            - 'Arn'
+      TaskRoleArn: !GetAtt TreeSchemaECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: 'tree-schema-one-off-batches'
+          Image: !Ref TreeSchemaImage
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref TreeSchemaOneOffLogGroup
+              awslogs-stream-prefix: ecs
+          EntryPoint:
+            - "/cmds/entrypoint"
+          Command:
+            - "/cmds/update_help"
+          Secrets:
+            - Name: TREE_SCHEMA_SECRET
+              ValueFrom: !Ref SecretsArn
+          Environment:
+            - Name: REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_UPLOAD_FILES_BUCKET
+              Value: !Ref TreeSchemmaFilesBucket
+            - Name: DEFAULT_FROM_EMAIL_ADDRESS
+              Value: !Ref FromEmailAddress
+            - Name: KMS_KEY_ALIAS
+              Value: !Ref KmsKeyArn
 
   ###########################
   # Load balancer resources #
