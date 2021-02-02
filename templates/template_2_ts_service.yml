@@ -297,6 +297,14 @@ Resources:
               Value: !Ref FromEmailAddress
             - Name: KMS_KEY_ALIAS
               Value: !Ref KmsKeyArn
+            - Name: TREE_SCHEMA_TASK_DEFINITION
+              Value: !Join ['', ['tree-schema-app', TreeSchemaTaskDefinition]]
+            - Name: TREE_SCHEMA_ECS_CLUSTER
+              Value: !Ref TreeSchemaECSCluster
+            - Name: TREE_SCHEMA_SUBNETS
+              Value: !Ref AppSubnets
+            - Name: TREE_SCHEMA_SECURITY_GROUPS
+              Value: !Ref AppSecurityGroups
         - Name: tree-schema-nginx
           Image: !Ref TreeSchemaNginxImage
           PortMappings:
